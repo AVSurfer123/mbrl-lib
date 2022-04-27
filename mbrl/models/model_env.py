@@ -47,6 +47,7 @@ class ModelEnv:
         self.reward_fn = reward_fn
         self.device = model.device
 
+        self.env = env
         self.observation_space = env.observation_space
         self.action_space = env.action_space
 

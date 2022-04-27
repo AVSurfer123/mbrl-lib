@@ -4,7 +4,7 @@ import gym
 import numpy as np
 from gym import logger, spaces
 from gym.utils import seeding
-from util import splines
+from feedback_rl.splines import ConstAccelSpline, Spline
 
 
 class CartPoleEnvAcc(gym.Env):
@@ -13,7 +13,7 @@ class CartPoleEnvAcc(gym.Env):
     # a multiplicative factor to the total force.
     metadata = {"render.modes": ["human", "rgb_array"], "video.frames_per_second": 50}
 
-    def __init__(self):
+    def __init__(self, spline_time_horizon=20):
         self.gravity = 9.8
         self.masscart = 1.0
         self.masspole = 0.1
@@ -23,8 +23,11 @@ class CartPoleEnvAcc(gym.Env):
         self.force_mag = 10.0
         self.tau = 0.02  # seconds between state updates
         self.kinematics_integrator = "euler"
-        self.prediction_horizon = 20
+
+        self.time_horizon = spline_time_horizon
+        self.timestep = spline_time_horizon * self.tau
         self.pole_inertia_coefficient = 1
+        self.known_states = 2
 
         # Angle at which to fail the episode
         self.theta_threshold_radians = 12 * 2 * math.pi / 360
@@ -57,17 +60,13 @@ class CartPoleEnvAcc(gym.Env):
         return [seed]
 
     def step(self, action):
-
         action = action.squeeze()
 
         spline = ConstAccelSpline(num_knots=2)
-        end_time = self.prediction_horizon * self.tau
-        spline.random_spline([0, end_time], 1)
-        spline.params = [action]
-
+        spline.set_spline([0, self.timestep], [action])
         xi_initial = np.array([self.state[0], self.state[1]])
 
-        for i in range(self.prediction_horizon):
+        for i in range(self.time_horizon):
 
             action = self.feedback_controller(i * self.tau, spline, xi_initial)
 
@@ -200,8 +199,8 @@ class CartPoleEnvAcc(gym.Env):
             self.viewer.close()
             self.viewer = None
 
-    def feedback_controller(self, t, traj, xi_initial):
-        v = 0
+    def feedback_controller(self, t, traj: Spline, xi_initial: np.ndarray):
+        g = 9.81
         M = self.masscart
         m = self.masspole
         l = self.length * 2
@@ -221,3 +220,10 @@ class CartPoleEnvAcc(gym.Env):
         u_star = -m*l*np.sin(theta) * theta_dot**2  - m*g*np.sin(theta)*np.cos(theta) / (1 + self.pole_inertia_coefficient)
         F = u_star + (M + m - m*np.cos(theta)**2 / (1 + self.pole_inertia_coefficient)) * v
         return F
+
+    def xi_dynamics(self, obs, action):
+        spline = ConstAccelSpline(num_knots=2)
+        spline.set_spline([0, self.timestep], action)
+        xi_initial = np.array([obs[0], obs[1]])
+        next_xi = xi_initial + spline.x(self.timestep)
+        return next_xi

@@ -10,22 +10,6 @@ from . import Model, ModelEnv
 
 class EtaModelEnv(ModelEnv):
 
-    def __init__(self, xi_dynamics, num_known, *args, **kwargs):
-        """
-        
-        Args:
-            xi_dynamics: dynamics function from (model_state, action) -> next_xi
-            num_known: Number of known state dynamics (xi variables) from feedback linearization
-                       We assume the first num_known states of the environment are the xi variables.
-        """
-        super().__init__(*args, **kwargs)
-
-        self.num_obs = self.observation_space.shape
-        self.num_act = self.action_space.shape
-        self.state = np.zeros(self.num_obs)
-        self.xi_dynamics = xi_dynamics
-        self.num_known = num_known
-
     def step(
         self,
         actions: mbrl.types.TensorType,
@@ -64,8 +48,16 @@ class EtaModelEnv(ModelEnv):
                 rng=self._rng,
             )
 
-            xi = self.xi_dynamics(model_state, actions)
-            next_model_state['obs'][:self.num_known] = xi
+            # Replace missing xi states with known dynamics
+            final_obs = torch.zeros((actions.shape[0], self.observation_space.shape[0]), device=self.device)
+            for i in range(actions.shape[0]):
+                obs = model_state['obs'][i].cpu().numpy()
+                next_xi = self.env.xi_dynamics(obs, actions[i].cpu().numpy())
+                final_obs[i, :self.env.known_states] = torch.from_numpy(next_xi).to(self.device)
+                final_obs[i, self.env.known_states:] = next_observs[i]
+
+            next_model_state['obs'] = final_obs
+            next_observs = final_obs # Don't know if it needs to be copied with .detach().clone()
 
             rewards = (
                 pred_rewards

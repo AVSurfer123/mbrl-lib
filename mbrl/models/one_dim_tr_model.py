@@ -68,6 +68,7 @@ class OneDTransitionRewardModel(Model):
         num_elites (int, optional): if provided, only the best ``num_elites`` models according
             to validation score are used when calling :meth:`predict`. Defaults to
             ``None`` which means that all models will always be included in the elite set.
+        reduced_size (int, optional): number of xi variables, i.e. reduced states we don't learn
     """
 
     def __init__(
@@ -80,6 +81,7 @@ class OneDTransitionRewardModel(Model):
         obs_process_fn: Optional[mbrl.types.ObsProcessFnType] = None,
         no_delta_list: Optional[List[int]] = None,
         num_elites: Optional[int] = None,
+        reduced_size: int = 0,
     ):
         super().__init__(model.device)
         self.model = model
@@ -95,6 +97,7 @@ class OneDTransitionRewardModel(Model):
         self.target_is_delta = target_is_delta
         self.no_delta_list = no_delta_list if no_delta_list else []
         self.obs_process_fn = obs_process_fn
+        self.reduced_size = reduced_size
 
         self.num_elites = num_elites
         if not num_elites and isinstance(self.model, Ensemble):
@@ -125,6 +128,9 @@ class OneDTransitionRewardModel(Model):
                 target_obs[..., dim] = next_obs[..., dim]
         else:
             target_obs = next_obs
+        if self.reduced_size:
+            # Reduce number of dynamcis we learn
+            target_obs = target_obs[..., self.reduced_size:]
         target_obs = model_util.to_tensor(target_obs).to(self.device)
 
         model_in = self._get_model_input(obs, action)
@@ -280,7 +286,8 @@ class OneDTransitionRewardModel(Model):
         )
         next_observs = preds[:, :-1] if self.learned_rewards else preds
         if self.target_is_delta:
-            tmp_ = next_observs + obs
+            # Need to account for reduced size output of dynamics model
+            tmp_ = next_observs + obs[..., self.reduced_size:]
             for dim in self.no_delta_list:
                 tmp_[:, dim] = next_observs[:, dim]
             next_observs = tmp_

@@ -58,14 +58,19 @@ def _legacy_make_env(
     elif "gym___" in cfg.overrides.env:
         env = gym.make(cfg.overrides.env.split("___")[1])
         term_fn, reward_fn = _get_term_and_reward_fn(cfg)
+    elif cfg.overrides.env == "cartpole_continuous":
+        env = mbrl.env.cartpole_continuous.CartPoleEnv()
+        term_fn = mbrl.env.termination_fns.cartpole
+        reward_fn = mbrl.env.reward_fns.cartpole
+    elif cfg.overrides.env == "cartpole_acc":
+        import mbrl.env
+        env = mbrl.env.cartpole_acc.CartPoleEnvAcc(cfg.overrides.spline_time_horizon)
+        term_fn = mbrl.env.termination_fns.cartpole
+        reward_fn = mbrl.env.reward_fns.cartpole
     else:
         import mbrl.env.mujoco_envs
 
-        if cfg.overrides.env == "cartpole_continuous":
-            env = mbrl.env.cartpole_continuous.CartPoleEnv()
-            term_fn = mbrl.env.termination_fns.cartpole
-            reward_fn = mbrl.env.reward_fns.cartpole
-        elif cfg.overrides.env == "cartpole_pets_version":
+        if cfg.overrides.env == "cartpole_pets_version":
             env = mbrl.env.mujoco_envs.CartPoleEnv()
             term_fn = mbrl.env.termination_fns.no_termination
             reward_fn = mbrl.env.reward_fns.cartpole_pets

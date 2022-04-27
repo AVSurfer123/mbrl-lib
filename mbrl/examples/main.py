@@ -10,6 +10,7 @@ import torch
 import mbrl.algorithms.mbpo as mbpo
 import mbrl.algorithms.pets as pets
 import mbrl.algorithms.planet as planet
+import mbrl.algorithms.reduced_pets as reduced_pets
 import mbrl.util.env
 
 
@@ -18,6 +19,8 @@ def run(cfg: omegaconf.DictConfig):
     env, term_fn, reward_fn = mbrl.util.env.EnvHandler.make_env(cfg)
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
+    if cfg.overrides.use_reduced_model:
+        return reduced_pets.train(env, term_fn, reward_fn, cfg)
     if cfg.algorithm.name == "pets":
         return pets.train(env, term_fn, reward_fn, cfg)
     if cfg.algorithm.name == "mbpo":
