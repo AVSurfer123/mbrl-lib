@@ -22,6 +22,8 @@ class CartPoleEnv(gym.Env):
         self.force_mag = 10.0
         self.tau = 0.02  # seconds between state updates
         self.kinematics_integrator = "euler"
+        self.friction = 0.1
+        self.pole_inertia_coefficient = 1.0
 
         # Angle at which to fail the episode
         self.theta_threshold_radians = 12 * 2 * math.pi / 360
@@ -55,20 +57,38 @@ class CartPoleEnv(gym.Env):
 
     def step(self, action):
         action = action.squeeze()
+        # action = np.clip(action, self.action_space.low[0], self.action_space.high[0])
+        # print("action 2:", action)
+
         x, x_dot, theta, theta_dot = self.state
         force = action * self.force_mag
-        costheta = math.cos(theta)
-        sintheta = math.sin(theta)
+        cos_theta = math.cos(theta)
+        sin_theta = math.sin(theta)
 
         # For the interested reader:
         # https://coneural.org/florian/papers/05_cart_pole.pdf
-        temp = (
-            force + self.polemass_length * theta_dot**2 * sintheta
-        ) / self.total_mass
-        thetaacc = (self.gravity * sintheta - costheta * temp) / (
-            self.length * (4.0 / 3.0 - self.masspole * costheta**2 / self.total_mass)
+        # temp = (
+        #     force + self.polemass_length * theta_dot**2 * sintheta
+        # ) / self.total_mass
+        # thetaacc = (self.gravity * sintheta - costheta * temp) / (
+        #     self.length * (4.0 / 3.0 - self.masspole * costheta**2 / self.total_mass)
+        # )
+        # xacc = temp - self.polemass_length * thetaacc * costheta / self.total_mass
+
+        xacc = (
+            -2 * self.polemass_length * (theta_dot ** 2) * sin_theta
+            + 3 * self.masspole * self.gravity * sin_theta * cos_theta
+            + 4 * action
+            - 4 * self.friction * x_dot
+        ) / (4 * self.total_mass - 3 * self.masspole * cos_theta ** 2)
+        thetaacc = (
+            -3 * self.polemass_length * (theta_dot ** 2) * sin_theta * cos_theta
+            + 6 * self.total_mass * self.gravity * sin_theta
+            + 6 * (action - self.friction * x_dot) * cos_theta
+        ) / (
+            4 * self.length * self.total_mass
+            - 3 * self.polemass_length * cos_theta ** 2
         )
-        xacc = temp - self.polemass_length * thetaacc * costheta / self.total_mass
 
         if self.kinematics_integrator == "euler":
             x = x + self.tau * x_dot
@@ -86,8 +106,8 @@ class CartPoleEnv(gym.Env):
         done = bool(
             x < -self.x_threshold
             or x > self.x_threshold
-            or theta < -self.theta_threshold_radians
-            or theta > self.theta_threshold_radians
+            # or theta < -self.theta_threshold_radians
+            # or theta > self.theta_threshold_radians
         )
 
         if not done:

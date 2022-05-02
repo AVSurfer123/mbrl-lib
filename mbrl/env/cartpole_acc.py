@@ -6,6 +6,8 @@ from gym import logger, spaces
 from gym.utils import seeding
 from feedback_rl.splines import ConstAccelSpline, Spline
 
+from mbrl.env.cartpole_continuous import CartPoleEnv
+
 
 class CartPoleEnvAcc(gym.Env):
     # This is a continuous version of gym's cartpole environment, with the only difference
@@ -14,212 +16,76 @@ class CartPoleEnvAcc(gym.Env):
     metadata = {"render.modes": ["human", "rgb_array"], "video.frames_per_second": 50}
 
     def __init__(self, spline_time_horizon=20):
-        self.gravity = 9.8
-        self.masscart = 1.0
-        self.masspole = 0.1
-        self.total_mass = self.masspole + self.masscart
-        self.length = 0.5  # actually half the pole's length
-        self.polemass_length = self.masspole * self.length
-        self.force_mag = 10.0
-        self.tau = 0.02  # seconds between state updates
-        self.kinematics_integrator = "euler"
+        self.env = CartPoleEnv()
 
         self.time_horizon = spline_time_horizon
-        self.timestep = spline_time_horizon * self.tau
+        self.timestep = spline_time_horizon * self.env.tau
         self.pole_inertia_coefficient = 1
         self.known_states = 2
 
-        # Angle at which to fail the episode
-        self.theta_threshold_radians = 12 * 2 * math.pi / 360
-        self.x_threshold = 2.4
-
-        # Angle limit set to 2 * theta_threshold_radians so failing observation
-        # is still within bounds.
-        high = np.array(
-            [
-                self.x_threshold * 2,
-                np.finfo(np.float32).max,
-                self.theta_threshold_radians * 2,
-                np.finfo(np.float32).max,
-            ],
-            dtype=np.float32,
-        )
+        self.counter = 0
+        self.curr_action = 0
+        self.spline = None
+        self.xi_initial = None
+        self.force = 0
 
         act_high = np.array((1,), dtype=np.float32)
         self.action_space = spaces.Box(-act_high, act_high, dtype=np.float32)
-        self.observation_space = spaces.Box(-high, high, dtype=np.float32)
-
-        self.seed()
-        self.viewer = None
-        self.state = None
-
-        self.steps_beyond_done = None
+        self.observation_space = self.env.observation_space
 
     def seed(self, seed=None):
-        self.np_random, seed = seeding.np_random(seed)
+        self.env.np_random, seed = seeding.np_random(seed)
         return [seed]
 
-    def step(self, action):
-        action = action.squeeze()
+    def step_once(self, action=None):
+        """
+        Provide an action. Then can provide None for next self.time_horizon - 1 calls to step the inner environment once.
+        """
+        if action is None:
+            if self.counter >= self.time_horizon:
+                raise ValueError("Cannot step anymore for current acceleration")
+        else:
+            self.counter = 0
 
-        spline = ConstAccelSpline(num_knots=2)
-        spline.set_spline([0, self.timestep], [action])
-        xi_initial = np.array([self.state[0], self.state[1]])
+            # Get scalar action
+            if isinstance(action, list):
+                action = action[0]
+            else:
+                action = action.squeeze()
+
+            self.curr_action = action
+            self.spline = ConstAccelSpline(num_knots=2, init_vel=self.env.state[1])
+            self.spline.set_spline([0, self.timestep], [action])
+            self.xi_initial = np.array([self.env.state[0], self.env.state[1]])
+
+        self.force = feedback_controller(self.env, self.counter * self.env.tau, self.spline, self.xi_initial)
+        obs, rew, done, info = self.env.step(self.force)     
+
+        self.counter += 1
+
+        return obs, rew, done, info
+
+    def step(self, action):
+        reward = 0
 
         for i in range(self.time_horizon):
+            inner_action = action if i == 0 else None
 
-            action = self.feedback_controller(i * self.tau, spline, xi_initial)
+            obs, rew, done, _  = self.step_once(inner_action)
+            reward += rew
+            if done:
+                break
 
-            x, x_dot, theta, theta_dot = self.state
-            force = action * self.force_mag
-            costheta = math.cos(theta)
-            sintheta = math.sin(theta)
-
-            # For the interested reader:
-            # https://coneural.org/florian/papers/05_cart_pole.pdf
-            temp = (
-                force + self.polemass_length * theta_dot**2 * sintheta
-            ) / self.total_mass
-            thetaacc = (self.gravity * sintheta - costheta * temp) / (
-                self.length * (4.0 / 3.0 - self.masspole * costheta**2 / self.total_mass)
-            )
-            xacc = temp - self.polemass_length * thetaacc * costheta / self.total_mass
-
-            if self.kinematics_integrator == "euler":
-                x = x + self.tau * x_dot
-                x_dot = x_dot + self.tau * xacc
-                theta = theta + self.tau * theta_dot
-                theta_dot = theta_dot + self.tau * thetaacc
-            else:  # semi-implicit euler
-                x_dot = x_dot + self.tau * xacc
-                x = x + self.tau * x_dot
-                theta_dot = theta_dot + self.tau * thetaacc
-                theta = theta + self.tau * theta_dot
-
-            self.state = (x, x_dot, theta, theta_dot)
-
-        done = bool(
-            x < -self.x_threshold
-            or x > self.x_threshold
-            or theta < -self.theta_threshold_radians
-            or theta > self.theta_threshold_radians
-        )
-
-        if not done:
-            reward = 1.0
-        elif self.steps_beyond_done is None:
-            # Pole just fell!
-            self.steps_beyond_done = 0
-            reward = 1.0
-        else:
-            if self.steps_beyond_done == 0:
-                logger.warn(
-                    "You are calling 'step()' even though this "
-                    "environment has already returned done = True. You "
-                    "should always call 'reset()' once you receive 'done = "
-                    "True' -- any further steps are undefined behavior."
-                )
-            self.steps_beyond_done += 1
-            reward = 0.0
-
-        return np.array(self.state), reward, done, {}
+        return np.array(self.env.state), reward, done, {}
 
     def reset(self):
-        self.state = self.np_random.uniform(low=-0.05, high=0.05, size=(4,))
-        self.steps_beyond_done = None
-        return np.array(self.state)
+        return self.env.reset()
 
     def render(self, mode="human"):
-        screen_width = 600
-        screen_height = 400
-
-        world_width = self.x_threshold * 2
-        scale = screen_width / world_width
-        carty = 100  # TOP OF CART
-        polewidth = 10.0
-        polelen = scale * (2 * self.length)
-        cartwidth = 50.0
-        cartheight = 30.0
-
-        if self.viewer is None:
-            from gym.envs.classic_control import rendering
-
-            self.viewer = rendering.Viewer(screen_width, screen_height)
-            l, r, t, b = -cartwidth / 2, cartwidth / 2, cartheight / 2, -cartheight / 2
-            axleoffset = cartheight / 4.0
-            cart = rendering.FilledPolygon([(l, b), (l, t), (r, t), (r, b)])
-            self.carttrans = rendering.Transform()
-            cart.add_attr(self.carttrans)
-            self.viewer.add_geom(cart)
-            l, r, t, b = (
-                -polewidth / 2,
-                polewidth / 2,
-                polelen - polewidth / 2,
-                -polewidth / 2,
-            )
-            pole = rendering.FilledPolygon([(l, b), (l, t), (r, t), (r, b)])
-            pole.set_color(0.8, 0.6, 0.4)
-            self.poletrans = rendering.Transform(translation=(0, axleoffset))
-            pole.add_attr(self.poletrans)
-            pole.add_attr(self.carttrans)
-            self.viewer.add_geom(pole)
-            self.axle = rendering.make_circle(polewidth / 2)
-            self.axle.add_attr(self.poletrans)
-            self.axle.add_attr(self.carttrans)
-            self.axle.set_color(0.5, 0.5, 0.8)
-            self.viewer.add_geom(self.axle)
-            self.track = rendering.Line((0, carty), (screen_width, carty))
-            self.track.set_color(0, 0, 0)
-            self.viewer.add_geom(self.track)
-
-            self._pole_geom = pole
-
-        if self.state is None:
-            return None
-
-        # Edit the pole polygon vertex
-        pole = self._pole_geom
-        l, r, t, b = (
-            -polewidth / 2,
-            polewidth / 2,
-            polelen - polewidth / 2,
-            -polewidth / 2,
-        )
-        pole.v = [(l, b), (l, t), (r, t), (r, b)]
-
-        x = self.state
-        cartx = x[0] * scale + screen_width / 2.0  # MIDDLE OF CART
-        self.carttrans.set_translation(cartx, carty)
-        self.poletrans.set_rotation(-x[2])
-
-        return self.viewer.render(return_rgb_array=mode == "rgb_array")
+        return self.env.render()
 
     def close(self):
-        if self.viewer:
-            self.viewer.close()
-            self.viewer = None
-
-    def feedback_controller(self, t, traj: Spline, xi_initial: np.ndarray):
-        g = 9.81
-        M = self.masscart
-        m = self.masspole
-        l = self.length * 2
-        theta = self.state[2]
-        theta_dot = self.state[3]
-        xi = np.array([self.state[0], self.state[1]])
-
-        x_des = traj.deriv(t, 0)
-        x_dot_des = traj.deriv(t, 1)
-        xi_des = np.array([x_des, x_dot_des]) + xi_initial # Adding xi_initial since we assume spline value is an offset from starting position
-        v_ff = traj.deriv(t, 2)
-
-        # Choose closed-loop eigenvalues to be -3, -3, using standard CCF dynamics
-        K = np.array([-900, -60])
-        v = v_ff + K @ (xi - xi_des)
-
-        u_star = -m*l*np.sin(theta) * theta_dot**2  - m*g*np.sin(theta)*np.cos(theta) / (1 + self.pole_inertia_coefficient)
-        F = u_star + (M + m - m*np.cos(theta)**2 / (1 + self.pole_inertia_coefficient)) * v
-        return F
+        self.env.close()
 
     def xi_dynamics(self, obs, action):
         spline = ConstAccelSpline(num_knots=2)
@@ -227,3 +93,128 @@ class CartPoleEnvAcc(gym.Env):
         xi_initial = np.array([obs[0], obs[1]])
         next_xi = xi_initial + spline.x(self.timestep)
         return next_xi
+
+def feedback_controller(env: CartPoleEnv, t, traj: Spline, xi_initial: np.ndarray):
+    g = 9.81
+    M = env.masscart
+    m = env.masspole
+    l = env.length * 2
+    theta = env.state[2]
+    theta_dot = env.state[3]
+    xi = np.array([env.state[0], env.state[1]])
+
+    x_des = traj.deriv(t, 0)
+    x_dot_des = traj.deriv(t, 1)
+    xi_des = np.array([x_des + xi_initial[0], x_dot_des]) # + xi_initial # Adding xi_initial since we assume spline value is an offset from starting position
+    v_ff = traj.deriv(t, 2)
+
+    # Choose closed-loop eigenvalues to be -3, -3, using standard CCF dynamics
+    K = np.array([-900, -60])
+    v = v_ff + K @ (xi - xi_des)
+
+    u_star = -m*l*np.sin(theta) * theta_dot**2  - m*g*np.sin(theta)*np.cos(theta) / (1 + env.pole_inertia_coefficient)
+    F = u_star + (M + m - m*np.cos(theta)**2 / (1 + env.pole_inertia_coefficient)) * v
+    return F
+
+def test_controller():
+    from mbrl.env.cartpole_continuous import CartPoleEnv
+    import time
+    import matplotlib.pyplot as plt
+    FPS = 30
+    env = CartPoleEnv()
+    # env.seed()
+    obs = env.reset()
+    num_knots = 5
+    traj_des = ConstAccelSpline(num_knots, env.state[1])
+    STEPS = 20 * num_knots
+    times = np.linspace(0, STEPS, num_knots) * env.tau
+    # knots = times * np.sin(times) / 4
+    # traj_des.build_spline(times, knots)
+    param = np.random.uniform(-1, 1, size=(num_knots - 1,))
+    print("Random param:", param)
+    traj_des.set_spline(times, param)
+    data = [obs]
+    xi_initial = np.array([env.state[0], env.state[1]])
+    for i in range(STEPS):
+        action = feedback_controller(env, i * env.tau, traj_des, xi_initial)
+        print("Action:", action)
+        obs, rew, done, info = env.step(action)
+        print("obs:", obs)
+        data.append(obs)
+        env.render()
+        time.sleep(1/FPS)
+        if done:
+            print("Done at", i)
+            break
+    data = np.array(data)
+    print(data.shape)
+    
+    ax = plt.gca()
+    traj_des.plot(ax, order=0)
+    traj_des.plot(ax, order=1)
+    traj_des.plot(ax, order=2)
+    eval_times = np.arange(0, i + 2) * env.tau
+    diff = data[:, 0] - xi_initial[0]
+    print(diff)
+    plt.plot(eval_times, diff, label='x actual')
+    plt.plot(eval_times, data[:, 1], label='x dot actual')
+    plt.legend()
+    plt.savefig('tracking_sine_offset.png')
+    plt.show()
+
+if __name__ == '__main__':
+    # test_controller()
+    # quit()
+    env = CartPoleEnvAcc()
+    obs = env.reset()
+    data = [obs]
+    splines = []
+    initial = []
+    import time
+    import matplotlib.pyplot as plt
+    FPS = 30
+    STEPS = 5
+    num_steps = 0
+    for i in range(STEPS):
+        action = np.random.uniform(-1, 1, (1,))
+        print("Action:", action)
+
+        for j in range(env.time_horizon):
+            inner_action = action if j == 0 else None
+
+            obs, rew, done, _  = env.step_once(inner_action)
+
+            num_steps += 1
+            data.append(obs)
+            env.render()
+            time.sleep(1/FPS)
+
+            if done:
+                print("Done at stage", j)
+                break
+
+        splines.append(env.spline)
+        initial.append(env.xi_initial[0])
+
+        if done:
+            print("Done at spline", i)
+            break
+
+    data = np.array(data)
+    
+    ax = plt.gca()
+    eval_times = np.arange(0, num_steps + 1) * env.env.tau
+    for i in range(len(splines)):
+        times = np.linspace(0, env.timestep, num=500)
+        points = splines[i].eval_spline(times, 0)
+
+        ax.plot(times + i * env.timestep, points + initial[i], label=f"Spline {i} $x$")
+        ax.legend()
+        ax.grid()
+        ax.set(xlabel='Time', ylabel='Value', title='Spline Path')
+
+    plt.plot(eval_times, data[:, 0], label='x actual')
+    plt.plot(eval_times, data[:, 1], label='x dot actual')
+    plt.legend()
+    plt.savefig('tracking_controller.png')
+    plt.show()
