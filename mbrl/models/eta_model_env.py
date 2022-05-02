@@ -10,6 +10,34 @@ from . import Model, ModelEnv
 
 class EtaModelEnv(ModelEnv):
 
+    def reset(
+        self, initial_obs_batch: np.ndarray, return_as_np: bool = True
+    ) -> Dict[str, torch.Tensor]:
+        """Resets the model environment.
+
+        Args:
+            initial_obs_batch (np.ndarray): a batch of initial observations. One episode for
+                each observation will be run in parallel. Shape must be ``B x D``, where
+                ``B`` is batch size, and ``D`` is the observation dimension.
+            return_as_np (bool): if ``True``, this method and :meth:`step` will return
+                numpy arrays, otherwise it returns torch tensors in the same device as the
+                model. Defaults to ``True``.
+
+        Returns:
+            (dict(str, tensor)): the model state returned by `self.dynamics_model.reset()`.
+        """
+        if isinstance(self.dynamics_model, mbrl.models.OneDTransitionRewardModel):
+            assert len(initial_obs_batch.shape) == 2  # batch, obs_dim
+        with torch.no_grad():
+            xi_reset = torch.zeros((self.action_space.shape[0], self.env.known_states), device=self.device)
+            model_state = self.dynamics_model.reset(
+                initial_obs_batch.astype(np.float32), rng=self._rng
+            )
+            model_state["obs"] = torch.vstack((xi_reset, model_state["obs"].to(self.device)))
+
+        self._return_as_np = return_as_np
+        return model_state if model_state is not None else {}
+
     def step(
         self,
         actions: mbrl.types.TensorType,
