@@ -23,6 +23,8 @@ class CartPoleEnvAcc(gym.Env):
         self.force_mag = 10.0
         self.tau = 0.02  # seconds between state updates
         self.kinematics_integrator = "euler"
+        self.time_cap = 200
+        self.curr_time = 0
 
         self.time_horizon = spline_time_horizon
         self.timestep = spline_time_horizon * self.tau
@@ -60,7 +62,7 @@ class CartPoleEnvAcc(gym.Env):
         return [seed]
 
     def step(self, action):
-        action = action.squeeze()
+        action = action.squeeze() * self.force_mag #edited
 
         spline = ConstAccelSpline(num_knots=2)
         spline.set_spline([0, self.timestep], [action])
@@ -68,10 +70,10 @@ class CartPoleEnvAcc(gym.Env):
 
         for i in range(self.time_horizon):
 
-            action = self.feedback_controller(i * self.tau, spline, xi_initial)
+            action = self.feedback_controller(i * self.tau, spline, xi_initial)            
 
             x, x_dot, theta, theta_dot = self.state
-            force = action * self.force_mag
+            force = action # * self.force_mag
             costheta = math.cos(theta)
             sintheta = math.sin(theta)
 
@@ -98,11 +100,14 @@ class CartPoleEnvAcc(gym.Env):
 
             self.state = (x, x_dot, theta, theta_dot)
 
+        self.curr_time += 1
+
         done = bool(
             x < -self.x_threshold
             or x > self.x_threshold
-            or theta < -self.theta_threshold_radians
-            or theta > self.theta_threshold_radians
+            or self.curr_time > self.time_cap
+            #or theta < -self.theta_threshold_radians
+            #or theta > self.theta_threshold_radians
         )
 
         if not done:
@@ -127,7 +132,7 @@ class CartPoleEnvAcc(gym.Env):
     def reset(self):
         self.state = self.np_random.uniform(low=-0.05, high=0.05, size=(4,))
         self.steps_beyond_done = None
-        return np.array(self.state)
+        return self.state
 
     def render(self, mode="human"):
         screen_width = 600
@@ -205,6 +210,8 @@ class CartPoleEnvAcc(gym.Env):
         m = self.masspole
         l = self.length * 2
         theta = self.state[2]
+        costheta = math.cos(theta)
+        sintheta = math.sin(theta)        
         theta_dot = self.state[3]
         xi = np.array([self.state[0], self.state[1]])
 
@@ -217,8 +224,19 @@ class CartPoleEnvAcc(gym.Env):
         K = np.array([-900, -60])
         v = v_ff + K @ (xi - xi_des)
 
-        u_star = -m*l*np.sin(theta) * theta_dot**2  - m*g*np.sin(theta)*np.cos(theta) / (1 + self.pole_inertia_coefficient)
-        F = u_star + (M + m - m*np.cos(theta)**2 / (1 + self.pole_inertia_coefficient)) * v
+        c1 = self.total_mass * self.length * (4.0 / 3.0 - self.masspole * costheta**2 / self.total_mass)
+        term1 = self.polemass_length * (theta_dot**2) * sintheta / self.total_mass
+        term2 = -self.polemass_length*costheta*g*sintheta/c1
+        term3 = self.polemass_length*(costheta**2)*self.polemass_length*(theta_dot**2)*sintheta / (self.total_mass * c1)
+
+        u_star = term1 + term2 + term3
+
+        coeff = (1/self.total_mass) + (self.polemass_length*(costheta**2)/(self.total_mass * c1))
+
+        F = (v - u_star) / coeff
+        # u_star = -m*l*np.sin(theta) * theta_dot**2  - m*g*np.sin(theta)*np.cos(theta) / (1 + self.pole_inertia_coefficient)
+        # F = u_star + (M + m - m*np.cos(theta)**2 / (1 + self.pole_inertia_coefficient)) * v
+
         return F
 
     def xi_dynamics(self, obs, action):
